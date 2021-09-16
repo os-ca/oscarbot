@@ -1,0 +1,7 @@
+{
+    "threads": 10,
+    "use_proxies": true,
+    "webhook": "",
+    "timeout": 20,
+    "delay": 100
+}
