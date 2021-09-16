@@ -1,57 +1,60 @@
-import requests, json, csv, ctypes, queue, threading, asyncio, platform, sys, re, subprocess
-from datetime import datetime
-from modules import timer, get_eventid
+import ctypes, requests, json, csv, queue, threading, asyncio, platform, sys, subprocess, random, re, string
+from datetime import datetime, timedelta
+
+from requests.exceptions import ProxyError
+from requests.auth import HTTPProxyAuth
+
 try:
     from bs4 import BeautifulSoup as bs 
-    from colorama import init, Fore 
+    from colorama import init, Fore
+    import lxml
+    
 except ImportError:
     print("Import Error: Installing Dependencies")
     subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'colorama'])
     subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'bs4'])
-
-'''
-Build 0.1.5
-
-Change Log
-
-- Under Cart Hold Timed Event
-    - removed the extra GET Request to parse payload values
-    - after one test run, the script reads it as element is None.
-      however, spots were taken so it means the payload values were indeed 
-      correct but the redirect returns None.
-
-- ctype dynamic counters
-    - added -1 for carted and failed for cart holding
-
-- added another GET request after successful cart
-
-- added a finally statement to end queue'd tasks
-
-- changed Profile(s) to Thread(s)
-
-- added Cart Mode 2 with a GET Request right after Timed Sleep Event
-
-- notes
-    - seems like after a couple POST request, the failed statement is shown
-    - maybe the repeated payload values returns "existing member trying to sign up 
-      when the POST request intervals are too early
-
-'''
+    subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'lxml']) 
 
 # init stuff
-version= str(json.load(open("./data/bot_data.json","r"))['version'])
-launcher = str(json.load(open("./data/bot_data.json","r"))['launcher'])
+version= "1.7.4"
+launcher = "REQUEST"
 init(convert=True) if platform.system() == "Windows" else init()
-ctypes.windll.kernel32.SetConsoleTitleW(f"OSCAR BOT {version} | {launcher}")
+ctypes.windll.kernel32.SetConsoleTitleW(f"{version} | {launcher}")
+# Payload values for fetching classes.svg
+headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0',
+}
 
+data = {
+    'calendarId': 'f14c6c16-b80d-48dd-be79-aa664d2346b4',
+    'widgetId': '15f6af07-39c5-473e-b053-96653f77a406',
+    'page': '0',
+    'dateString': '',
+    '__RequestVerificationToken': 'HgRXPgCiZoFqhxqAvrLPxvDcykNaUtOFxtBpZwZsHUiR_nd1Og1SP6zIBMRFdB4Q0DQGDwdjha_OCJ-hQZXf4oAqeBURNokoOL1vwadaEvqdH-Br0'
+    }
+
+url = 'https://ubc.perfectmind.com/24063/Clients/BookMe4BookingPages/Classes'    
+
+def id_gen(size=4, chars=string.ascii_uppercase + string.digits):
+    """ randomly genned ids for task id, log id, etc"""
+    return ''.join(random.choice(chars) for _ in range(size))
+
+fetchedList, fetchedList2 = [], []
 def inits():
-    global use_proxies,wh_,eventid,threads,delay
+    global use_proxies,wh_,eventid,threads,delay, timeout
     with open("./data/settings.json", "r") as settings:
         data = json.loads(settings.read())
         wh_ = data['webhook']
         threads = data['threads']
         use_proxies = data['use_proxies']
         delay = data['delay']
+        timeout = data['timeout']
+    
+    # Proxies
+    if use_proxies is True:
+        global proxyList
+        with open("./data/proxies.txt","r") as proxyfile:
+            proxyfile.read().split('\n')
 
     global queue_
     queue_ = queue.Queue(maxsize=threads)
@@ -62,6 +65,7 @@ def inits():
 cyan = "\033[96m"
 lightblue = "\033[94m"
 orange = "\033[33m"
+
 
 class Logger:
     @staticmethod
@@ -79,35 +83,75 @@ class Logger:
     @staticmethod
     def success(message):
         print(f"{Fore.GREEN}[{Logger.timestamp()}] {message}") 
+    @staticmethod
+    def error2(message):
+        print(f"{Fore.RED}{message}") 
+    @staticmethod
+    def n2(message):
+        print(f"{orange}{message}") 
+
+class Proxy:
+    """ determines the proxy type and returns a random proxy respective type"""
+    @staticmethod
+    def get_proxy(proxyList):
+        proxy = random.choice(proxyList)
+        if len(proxy.split(":")) == 2:
+            proxy_type = "IP"
+        elif len(proxy.split(":")) == 4:
+            proxy_type = "UP"
+        else:
+            Logger.error2("Invalid Proxy Format. Localhost default")
+            proxy_type = "LH"
+        # returns proxy and the type
+        return proxy, proxy_type
+
+class Headers:
+    @staticmethod
+    def chead():
+        ctypes.windll.kernel32.SetConsoleTitleW(f"{version} | {launcher} | Thread(s): {threads} | Delay: {delay} | Sleeping: {sleeping} | Carted: {carted} | Failed: {failed}")
+
 # constants
 login = 'https://portal.recreation.ubc.ca/index.php?r=public%2Findex'
 form = "https://ubc.perfectmind.com/24063/Menu/BookMe4RegistrationForms/FillForms"
-extras = "https://ubc.perfectmind.com/24063/Clients/BookMe4Extras/Extras"
-store = "https://ubc.perfectmind.com/24063/Clients/BookMe4Cart/RedirectToStore"
 
 def get_profiles(n):
-    global username,password,user_sig,cc_num,cc_ccv,cc_strt,cc_city,cc_zip,cc_month,cc_year,cc_name,count
-    version= str(json.load(open("./data/bot_data.json","r"))['version'])
+    """ grabs bot_data.json values and profiles.csv """
+    global username,password
     new_list = []
     with open("./data/profiles.csv",'r',newline='',encoding="utf-8-sig") as csvfile:
         reader = csv.DictReader(csvfile)
         for row in reader:
-            new_list.extend([[row["username"],row['password'],row['signature'],row['number'],row['ccv'],\
-                row['street'],row['city'],row['zip'],row['month'],row['year'],row['fullname']]])
-        username,password,user_sig,cc_num,cc_ccv,cc_strt,cc_city,cc_zip,cc_month,cc_year,cc_name = \
-            new_list[n][0],new_list[n][1],new_list[n][2],new_list[n][3],new_list[n][4],new_list[n][5],\
-            new_list[n][6],new_list[n][7],new_list[n][8],new_list[n][9],new_list[n][10]
-        ctypes.windll.kernel32.SetConsoleTitleW(f"OSCAR BOT {version} | {launcher} | Thread(s): {threads}")
+            new_list.extend([[row["username"],row['password']]])
+        username,password = new_list[n][0],new_list[n][1]
 
-def profile_count():
-    # counts the number of profiles in the CSV file and returns an int
-    global profiles
+def prof_count():
+    """ returns profile count as int """
     with open("./data/profiles.csv",'r',newline='',encoding="utf-8-sig") as csvfile:
         reader = csv.DictReader(csvfile)
         profiles = int(len(list(reader))-1)
-        return profiles
+    return profiles
 
-def wh(method,checkout,username):
+def get_eventid(eventid):
+    """ returns url for the specific eventid"""
+    event_id = eventid
+    tmrw_ = (''.join(re.split('-',str(datetime.strptime(str((datetime.today()+timedelta(days=1)))[:10], "%Y-%m-%d").date()))))
+    url = f"https://ubc.perfectmind.com/24063/Clients/BookMe4EventParticipants?eventId={event_id}&occurrenceDate={tmrw_}&&locationId=27a6cd2c-34a1-40f9-822e-cf70b5bca13c&waitListMode=False" 
+    return url, event_id
+
+def timer(user_time):
+    """ timed event """
+    today = datetime.now().time()
+    d_start = datetime.strptime(str(today)[:-7], "%H:%M:%S")
+    d_end = datetime.strptime(user_time, "%H:%M:%S")
+    diff = (d_end-d_start).total_seconds()
+    if diff < 0:
+        print("Error: Negative Seconds. Returning Time.sleep(1)")
+        diff = 1
+        return diff
+    else:
+        return diff
+
+def wh(method,checkout,username,course):
     # webhook
     if method  == "cart_hold":
 
@@ -125,7 +169,7 @@ def wh(method,checkout,username):
                     "fields": [
                         {
                             "name": "Event ID",
-                            "value": f"{get_eventid.event_id}",
+                            "value": f"{course}",
                             "inline": False
                         },
                         {
@@ -160,34 +204,143 @@ def wh(method,checkout,username):
     else:
         pass       
 
-# No GET Request after sleep is done
+def BookPageFetch(taskid,clientname,r):
+    """ fetches all payload values for booking page and unpacks all values into the data payload for the POST Request """
+    
+    soup = bs(r.text,'lxml')
+    try:
+        # fetching values for the specific username task
+        eventid2 = (soup.select_one('input[name="EventId"]')["value"])
+        token = soup.select_one('input[name="__RequestVerificationToken"]')['value']
+        priceid = soup.find(id='ParticipantsFamily_FamilyMembers_0__PriceTypeId')['value']
+        widgetid = soup.find(id='EventInfo_WidgetId')['value']
+        regformid = soup.find(id='EventInfo_RegFormId')['value']
+        calendarid = soup.find(id='EventInfo_CalendarId')['value']
+        programid = soup.find(id='EventInfo_ProgramId')['value']
+        date = soup.find(id="EventInfo_OccurrenceDate")['value']
+        contactid = soup.find(id='ParticipantsFamily_ReferralContactId')['value']
+        facilityid = soup.find(id='EventInfo_FacilityId')['value']
+        parentid = soup.find(id='EventInfo_ParentEventId')['value']
+        locationid = soup.find(id="EventInfo_LocationId")['value']
+
+        # data payload
+        data = [
+                        ('__RequestVerificationToken', f'{token}'),
+                        ('EventInfo.WidgetId', f'{widgetid}'),
+                        ('EventInfo.RegFormId', f'{regformid}'),
+                        ('EventInfo.CalendarId', f'{calendarid}'),
+                        ('EventInfo.ProgramId', f'{programid}'),
+                        ('EventInfo.ServiceDurationId', ''),
+                        ('EventInfo.LocationId', f'{locationid}'),
+                        ('EventInfo.Instructor.Id', ''),
+                        ('EventInfo.AppointmentStartDateTimeTicks', '0'),
+                        ('EventInfo.OccurrenceDate', f'{date}'),
+                        ('ParticipantsFamily.ReferralContactId', f'{contactid}'),
+                        ('EventInfo.FacilityId', f'{facilityid}'),
+                        ('EventInfo.IgnoreEventCapacity', 'False'),
+                        ('EventInfo.ParentEventId', f'{parentid}'),
+                        ('LandingPageBackUrl', ''),
+                        ('SkipRegistrationForm', 'False'),
+                        ('WaitListMode', 'False'),
+                        ('AmendmentMode', 'False'),
+                        ('AmendmentInitiatorId', ''),
+                        ('ParticipantsFamily.EventId', f'{eventid2}'),
+                        ('ParticipantsFamily.FamilyMembers[0].MemberId', f'{contactid}'),
+                        ('ParticipantsFamily.FamilyMembers[0].AccountId', ''),
+                        ('ParticipantsFamily.FamilyMembers[0].FullNameSimple', f'{clientname}'),
+                        ('ParticipantsFamily.FamilyMembers[0].FamilyMembership', 'You'),
+                        ('ParticipantsFamily.FamilyMembers[0].Photo', ''),
+                        ('ParticipantsFamily.FamilyMembers[0].PriceTypeId', f'{priceid}'),
+                        ('ParticipantsFamily.FamilyMembers[0].IsParticipating', 'true'),
+                        ('ParticipantsFamily.FamilyMembers[0].IsParticipating', 'false'),
+                        ('ParticipantsFamily.FamilyMembers[0].AttendanceStatus', ''),
+                    ] 
+        return data
+    except AttributeError:
+        return Logger.error(f"[{taskid}] BookPageFetch: Error Fetching Payload Data")
+
 class CartHold():
-    def __init__(self,username,password):
-        self.username,self.password = username,password
+    def __init__(self,taskid,username,password,course):
+        self.taskid,self.username,self.password,self.course = taskid,username,password,course
         queue_.put(self)
-        ctypes.windll.kernel32.SetConsoleTitleW(f"OSCAR BOT {version} | {launcher} | Thread(s): {threads} | Delay: {delay} | Sleeping: {sleeping} | Carted: {carted} | Failed: {failed}")
         threading.Thread(target=self.run).start()
     def run(self):
         asyncio.run(self.login_())
 
     async def login_(self):
-        global sleeping, carted, failed
-        # header
-        headers = {
-                'User-Agent' : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                }
+        global sleeping, carted, failed    
+        Headers.chead()
 
+        # Logging stuff
+        LOG_FILENAME = f'{self.taskid}_{datetime.utcnow().strftime("%Y_%m_%d_%H_%M_%S")}'
+        log = open(f"./data/logs/{LOG_FILENAME}.txt", "w+")
+        log.close()
+
+        headers = {
+            'User-Agent' : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            }
+        
         # request session
         s = requests.Session()
+         
+        # proxy statements
+        if use_proxies is False:
+            proxy = ['localhost']
+        else:
+            proxyList=[]
+            with open("./data/proxies.txt", "r+") as f:
+                if f.read() == "":
+                    proxy = 'localhost'
+                   
+                else:
+                    with open("./data/proxies.txt", "r+") as f:
+                        for proxy in f:
+                            proxyList.append(proxy)
+                        proxy = Proxy.get_proxy(proxyList)
+
+                        if proxy[1] == "IP":
+                            proxies = {'https' : f'http://{proxy[0]}'}
+                            s.proxies = proxies
+                            proxy = re.split("\n",proxy[0])[0]
+        
+                        elif proxy[1] == "UP":
+                            auth = HTTPProxyAuth(f"{proxy[0].split(':')[2]}",f"{proxy[0].split(':')[3]}")
+                            proxies = {'http' : f"http://{proxy[0].split(':')[0]}:{proxy[0].split(':')[1]}"}
+                            s.proxies = proxies
+                            s.auth = auth
+                            proxy = f"{proxy[0].split(':')[0]}:{proxy[0].split(':')[1]}"
+
+                        elif proxy[1] == "LH":
+                            proxy = 'localhost'
+            
+        
         # login thru get request
-        Logger.normal(f"[{self.username}] Logging In")
-        r = s.get(login)   
+        try:
+            Logger.normal(f"[{proxy}] [{self.taskid}] Logging In")
+            r = s.get(login,timeout=timeout)   
+        except ProxyError:
+            failed+=1
+            Headers.chead()
+            return Logger.error(f"[{proxy}] [{self.taskid}] Proxy Error")
+            
+        except Exception as e:
+            failed+=1
+            Headers.chead()
+            return Logger.error(f"[{proxy}] [{self.taskid}] Error at Log in: {e}")
+            
+        except TimeoutError:
+            failed+=1
+            Headers.chead()
+            return Logger.error(f"[{proxy}] [{self.taskid}] Timed out!")
+        
         soup = bs(r.text,'lxml')
         #csrf token fetch
         try:
             csrf_token = soup.select_one('meta[name="csrf-token"]')['content']
         except AttributeError:
-            Logger.error(f"[{self.username}] Error Fetching CSRF Token")
+            failed+=1
+            Headers.chead()
+            return Logger.error(f"[{proxy}] [{self.taskid}] Error Fetching CSRF Token")
         # Cookie Fetch
         cookies = r.cookies
         # Login Payload
@@ -200,743 +353,208 @@ class CartHold():
         # POST Login Payload
         try:
             # POST Login URL
-            r = s.post(login, cookies=cookies, data=data, headers=headers)
+            r = s.post(login, cookies=cookies, data=data, headers=headers, timeout=timeout)
             soup = bs(r.text,'lxml')
             # Finding "Client Element" to see if the Login was successful
             try:
                 element = soup.find("h1", {"id" : "online-page-header"})
             except AttributeError:
-                Logger.error(f"[{self.username}] Error Fetching Header: Login Issue")
+                failed+=1
+                Headers.chead()
+                return Logger.error(f"[{proxy}] [{self.taskid}] Error Fetching Header: Login Issue")
 
             if element.text == "Client":
-                Logger.success(f"[{self.username}] Successfully Logged In [{r.status_code}]")
-                ctypes.windll.kernel32.SetConsoleTitleW(f"OSCAR BOT {version} | {launcher} | Thread(s): {threads} | Delay: {delay} | Sleeping: {sleeping} | Carted: {carted} | Failed: {failed}")
+                Logger.success(f"[{proxy}] [{self.taskid}] Successfully Logged In [{r.status_code}]")
+
                 # clientname data used for payload value
                 clientname = (soup.find("span",class_="client-name")).text
-                Logger.normal(f"[{self.username}] Fetching Payload Data")
 
-                # GET request for the Event Booking Page
-                r = s.get(get_eventid.url)
-                soup = bs(r.text,'lxml')
-                # Important Values for payload
-                try:
-                    eventid2 = (soup.select_one('input[name="EventId"]')["value"])
-                    token = soup.select_one('input[name="__RequestVerificationToken"]')['value']
-                    priceid = soup.find(id='ParticipantsFamily_FamilyMembers_0__PriceTypeId')['value']
-                    widgetid = soup.find(id='EventInfo_WidgetId')['value']
-                    regformid = soup.find(id='EventInfo_RegFormId')['value']
-                    calendarid = soup.find(id='EventInfo_CalendarId')['value']
-                    programid = soup.find(id='EventInfo_ProgramId')['value']
-                    date = soup.find(id="EventInfo_OccurrenceDate")['value']
-                    contactid = soup.find(id='ParticipantsFamily_ReferralContactId')['value']
-                    facilityid = soup.find(id='EventInfo_FacilityId')['value']
-                    parentid = soup.find(id='EventInfo_ParentEventId')['value']
-                    locationid = soup.find(id="EventInfo_LocationId")['value']
-                except AttributeError:
-                    Logger.error(f"[{self.username}] Error Fetching Payload Data")
-                # Payload Dict
-                data = [
-                    ('__RequestVerificationToken', f'{token}'),
-                    ('EventInfo.WidgetId', f'{widgetid}'),
-                    ('EventInfo.RegFormId', f'{regformid}'),
-                    ('EventInfo.CalendarId', f'{calendarid}'),
-                    ('EventInfo.ProgramId', f'{programid}'),
-                    ('EventInfo.ServiceDurationId', ''),
-                    ('EventInfo.LocationId', f'{locationid}'),
-                    ('EventInfo.Instructor.Id', ''),
-                    ('EventInfo.AppointmentStartDateTimeTicks', '0'),
-                    ('EventInfo.OccurrenceDate', f'{date}'),
-                    ('ParticipantsFamily.ReferralContactId', f'{contactid}'),
-                    ('EventInfo.FacilityId', f'{facilityid}'),
-                    ('EventInfo.IgnoreEventCapacity', 'False'),
-                    ('EventInfo.ParentEventId', f'{parentid}'),
-                    ('LandingPageBackUrl', ''),
-                    ('SkipRegistrationForm', 'False'),
-                    ('WaitListMode', 'False'),
-                    ('AmendmentMode', 'False'),
-                    ('AmendmentInitiatorId', ''),
-                    ('ParticipantsFamily.EventId', f'{eventid2}'),
-                    ('ParticipantsFamily.FamilyMembers[0].MemberId', f'{contactid}'),
-                    ('ParticipantsFamily.FamilyMembers[0].AccountId', ''),
-                    ('ParticipantsFamily.FamilyMembers[0].FullNameSimple', f'{clientname}'),
-                    ('ParticipantsFamily.FamilyMembers[0].FamilyMembership', 'You'),
-                    ('ParticipantsFamily.FamilyMembers[0].Photo', ''),
-                    ('ParticipantsFamily.FamilyMembers[0].PriceTypeId', f'{priceid}'),
-                    ('ParticipantsFamily.FamilyMembers[0].IsParticipating', 'true'),
-                    ('ParticipantsFamily.FamilyMembers[0].IsParticipating', 'false'),
-                    ('ParticipantsFamily.FamilyMembers[0].AttendanceStatus', ''),
-                ]
-               
-                if timed_event == "y":
-                    # timed event: sleeps tasks
-                    Logger.other(f"[{self.username}] Sleeping for: {timer.timer(user_time)} second(s)...")
-                    sleeping+=1
-                    ctypes.windll.kernel32.SetConsoleTitleW(f"OSCAR BOT {version} | {launcher} | Thread(s): {threads} | Delay: {delay} | Sleeping: {sleeping} | Carted: {carted} | Failed: {failed}")
-                    await asyncio.sleep(timer.timer(user_time))
-                    sleeping-=1
-                    ctypes.windll.kernel32.SetConsoleTitleW(f"OSCAR BOT {version} | {launcher} | Thread(s): {threads} | Delay: {delay} | Sleeping: {sleeping} | Carted: {carted} | Failed: {failed}")
-                    # Timed Event: ATC process
-                    while True:
-                        Logger.normal(f"[{self.username}] ATC...")
-                        # POST Fill Form
-                        r=s.post(form, headers=headers, cookies=cookies, data=data)
-                        soup = bs(r.text,'lxml')
-
-                        # This element will determine whether or not session had ATC'd
-                        element = soup.find("h2", {"id" : "bm-form-header"})
-
-                        # if element is not found, retry [3 Attempts before terminating]
-                        if element is None:
-                            failed+=1
-                            ctypes.windll.kernel32.SetConsoleTitleW(f"OSCAR BOT {version} | {launcher} | Thread(s): {threads} | Delay: {delay} | Sleeping: {sleeping} | Carted: {carted} | Failed: {failed}")
-                            retry=0
-                            while retry < 3:
-                                Logger.error(f'[{self.username}] Error: Full / Not Opened! Retrying [{retry}]...')
-                                wh("cart_hold","Error",self.username)
-                                Logger.other(f"[{self.username}] Sleeping... [{delay}]")
-                                await asyncio.sleep(int(delay))
-                                Logger.normal(f"[{self.username}] Refreshing...")
-                                r=s.post(form, headers=headers, cookies=cookies, data=data)
-                                retry+=1
-                            else:
-                                Logger.error(f'[{self.username}] Error: Full / Not Opened! Terminating [{retry}]')
-                                return False
-
-                        # successfully carted lesgo
-                        elif element.text == "DROP-IN - ADULT - OPEN GYM":
-                            carted+=1
-                            ctypes.windll.kernel32.SetConsoleTitleW(f"OSCAR BOT {version} | {launcher} | Thread(s): {threads} | Delay: {delay} | Sleeping: {sleeping} | Carted: {carted} | Failed: {failed}")
-                            Logger.success(f"[{self.username}] Successfully Carted! [{r.status_code}]")
-                            wh("cart_hold","Success",self.username)
-                        Logger.other(f"[{self.username}] Sleeping... [{delay}]")
-                        await asyncio.sleep(int(delay)) 
-                        # GET request for the Event Booking Page
-                        r = s.get(get_eventid.url)
-                        soup = bs(r.text,'lxml')
-                        # Important Values for payload
-                        try:
-                            eventid2 = (soup.select_one('input[name="EventId"]')["value"])
-                            token = soup.select_one('input[name="__RequestVerificationToken"]')['value']
-                            priceid = soup.find(id='ParticipantsFamily_FamilyMembers_0__PriceTypeId')['value']
-                            widgetid = soup.find(id='EventInfo_WidgetId')['value']
-                            regformid = soup.find(id='EventInfo_RegFormId')['value']
-                            calendarid = soup.find(id='EventInfo_CalendarId')['value']
-                            programid = soup.find(id='EventInfo_ProgramId')['value']
-                            date = soup.find(id="EventInfo_OccurrenceDate")['value']
-                            contactid = soup.find(id='ParticipantsFamily_ReferralContactId')['value']
-                            facilityid = soup.find(id='EventInfo_FacilityId')['value']
-                            parentid = soup.find(id='EventInfo_ParentEventId')['value']
-                            locationid = soup.find(id="EventInfo_LocationId")['value']
-                        except AttributeError:
-                            Logger.error(f"[{self.username}] Error Fetching Payload Data")
-                        # Payload Dict
-                        data = [
-                            ('__RequestVerificationToken', f'{token}'),
-                            ('EventInfo.WidgetId', f'{widgetid}'),
-                            ('EventInfo.RegFormId', f'{regformid}'),
-                            ('EventInfo.CalendarId', f'{calendarid}'),
-                            ('EventInfo.ProgramId', f'{programid}'),
-                            ('EventInfo.ServiceDurationId', ''),
-                            ('EventInfo.LocationId', f'{locationid}'),
-                            ('EventInfo.Instructor.Id', ''),
-                            ('EventInfo.AppointmentStartDateTimeTicks', '0'),
-                            ('EventInfo.OccurrenceDate', f'{date}'),
-                            ('ParticipantsFamily.ReferralContactId', f'{contactid}'),
-                            ('EventInfo.FacilityId', f'{facilityid}'),
-                            ('EventInfo.IgnoreEventCapacity', 'False'),
-                            ('EventInfo.ParentEventId', f'{parentid}'),
-                            ('LandingPageBackUrl', ''),
-                            ('SkipRegistrationForm', 'False'),
-                            ('WaitListMode', 'False'),
-                            ('AmendmentMode', 'False'),
-                            ('AmendmentInitiatorId', ''),
-                            ('ParticipantsFamily.EventId', f'{eventid2}'),
-                            ('ParticipantsFamily.FamilyMembers[0].MemberId', f'{contactid}'),
-                            ('ParticipantsFamily.FamilyMembers[0].AccountId', ''),
-                            ('ParticipantsFamily.FamilyMembers[0].FullNameSimple', f'{clientname}'),
-                            ('ParticipantsFamily.FamilyMembers[0].FamilyMembership', 'You'),
-                            ('ParticipantsFamily.FamilyMembers[0].Photo', ''),
-                            ('ParticipantsFamily.FamilyMembers[0].PriceTypeId', f'{priceid}'),
-                            ('ParticipantsFamily.FamilyMembers[0].IsParticipating', 'true'),
-                            ('ParticipantsFamily.FamilyMembers[0].IsParticipating', 'false'),
-                            ('ParticipantsFamily.FamilyMembers[0].AttendanceStatus', ''),
-                        ] 
-                        carted-=1
+                # GET request for the Event Booking Page and returns all payload values
+                Logger.normal(f"[{proxy}] [{self.taskid}] Fetching Payload Data")
+                url = get_eventid(self.course)
+                r = s.get(url[0], timeout=timeout)
+                data = BookPageFetch(self.taskid, clientname, r)
                 
-                elif timed_event == "n":
-                    # non timed event
-                    while True:
-                        Logger.normal(f"[{self.username}] ATC...")
+                # non timed event
+                while True:
+                    try:
+                        Logger.normal(f"[{proxy}] [{self.taskid}] ATC...")
                         # POST request on FillForm URL
                         r=s.post(form, headers=headers, cookies=cookies, data=data)
-                        soup = bs(r.text,'lxml')
-                        # Check to see if successfully carted
-                        element = soup.find("h2", {"id" : "bm-form-header"})
-                        if element is None:
+                    except Exception as e:
+                        failed+=1
+                        Headers.chead()
+                        return Logger.error(f"[{self.taskid}] ATC Error: {e}")
+                    soup = bs(r.text,'html.parser')
+                    # Check to see if successfully carted
+                    element = soup.find("h2", {"id" : "bm-form-header"})
+                    if element is None:
+                        retry=0
+                        while retry < 9999999:
+                            Logger.error(f'[{proxy}] [{self.taskid}] Error: Full / Not Opened! Retrying ({retry})...')
                             failed+=1
-                            ctypes.windll.kernel32.SetConsoleTitleW(f"OSCAR BOT {version} | {launcher} | Thread(s): {threads} | Delay: {delay} | Sleeping: {sleeping} | Carted: {carted} | Failed: {failed}")
-                            retry=0
-                            while retry < 3:
-                                Logger.error(f'[{self.username}] Error: Full / Not Opened! Retrying [{retry}]...')
-                                wh("cart_hold","Error",self.username)
-                                Logger.other(f"[{self.username}] Sleeping... [{delay}]")
-                                await asyncio.sleep(int(delay))
-                                Logger.normal(f"[{self.username}] Refreshing...")
-                                r=s.post(form, headers=headers, cookies=cookies, data=data)
+                            Headers.chead()
+                            wh("cart_hold","Error",self.username,self.course)
+                            Logger.other(f"[{proxy}] [{self.taskid}] Sleeping... ({delay}s)")
+                            await asyncio.sleep(int(delay))
+                            Logger.normal(f"[{proxy}] [{self.taskid}] Refreshing...")
+                            failed-=1
+                            try: 
+                                r=s.post(form, headers=headers, cookies=cookies, data=data, timeout=timeout)
                                 retry+=1
-                            else:
-                                Logger.error(f'[{self.username}] Error: Full / Not Opened! Terminating [{retry}]')
-                                return False
-                        
-                        if element.text == "DROP-IN - ADULT - OPEN GYM":
-                            carted+=1
-                            ctypes.windll.kernel32.SetConsoleTitleW(f"OSCAR BOT {version} | {launcher} | Thread(s): {threads} | Delay: {delay} | Sleeping: {sleeping} | Carted: {carted} | Failed: {failed}")
-                            Logger.success(f"[{self.username}] Successfully Carted! [{r.status_code}]")
-                            wh("cart_hold","Success",self.username)
+                            except TimeoutError:
+                                failed+=1
+                                Headers.chead()
+                                return Logger.error(f"[{proxy}] [{self.taskid}] Timed out!")
+                        else:
+                            failed+=1
+                            Headers.chead()
+                            Logger.error(f'[{proxy}] [{self.taskid}] Error: Full / Not Opened! Terminating ({retry})')
+                            return False
+                    
+                    if element.text == "DROP-IN - ADULT - OPEN GYM":
+                        carted+=1
+                        Headers.chead()
+                        Logger.success(f"[{proxy}] [{self.taskid}] Successfully Carted! [{r.status_code}]")
+                        wh("cart_hold","Success",self.username,self.course)
 
-                        Logger.other(f"[{self.username}] Sleeping... [{delay}]")
-                        await asyncio.sleep(int(delay))  
-                        # GET request for the Event Booking Page
-                        r = s.get(get_eventid.url)
-                        soup = bs(r.text,'lxml')
-                        # Important Values for payload
-                        try:
-                            eventid2 = (soup.select_one('input[name="EventId"]')["value"])
-                            token = soup.select_one('input[name="__RequestVerificationToken"]')['value']
-                            priceid = soup.find(id='ParticipantsFamily_FamilyMembers_0__PriceTypeId')['value']
-                            widgetid = soup.find(id='EventInfo_WidgetId')['value']
-                            regformid = soup.find(id='EventInfo_RegFormId')['value']
-                            calendarid = soup.find(id='EventInfo_CalendarId')['value']
-                            programid = soup.find(id='EventInfo_ProgramId')['value']
-                            date = soup.find(id="EventInfo_OccurrenceDate")['value']
-                            contactid = soup.find(id='ParticipantsFamily_ReferralContactId')['value']
-                            facilityid = soup.find(id='EventInfo_FacilityId')['value']
-                            parentid = soup.find(id='EventInfo_ParentEventId')['value']
-                            locationid = soup.find(id="EventInfo_LocationId")['value']
-                        except AttributeError:
-                            Logger.error(f"[{self.username}] Error Fetching Payload Data")
-                        # Payload Dict
-                        data = [
-                            ('__RequestVerificationToken', f'{token}'),
-                            ('EventInfo.WidgetId', f'{widgetid}'),
-                            ('EventInfo.RegFormId', f'{regformid}'),
-                            ('EventInfo.CalendarId', f'{calendarid}'),
-                            ('EventInfo.ProgramId', f'{programid}'),
-                            ('EventInfo.ServiceDurationId', ''),
-                            ('EventInfo.LocationId', f'{locationid}'),
-                            ('EventInfo.Instructor.Id', ''),
-                            ('EventInfo.AppointmentStartDateTimeTicks', '0'),
-                            ('EventInfo.OccurrenceDate', f'{date}'),
-                            ('ParticipantsFamily.ReferralContactId', f'{contactid}'),
-                            ('EventInfo.FacilityId', f'{facilityid}'),
-                            ('EventInfo.IgnoreEventCapacity', 'False'),
-                            ('EventInfo.ParentEventId', f'{parentid}'),
-                            ('LandingPageBackUrl', ''),
-                            ('SkipRegistrationForm', 'False'),
-                            ('WaitListMode', 'False'),
-                            ('AmendmentMode', 'False'),
-                            ('AmendmentInitiatorId', ''),
-                            ('ParticipantsFamily.EventId', f'{eventid2}'),
-                            ('ParticipantsFamily.FamilyMembers[0].MemberId', f'{contactid}'),
-                            ('ParticipantsFamily.FamilyMembers[0].AccountId', ''),
-                            ('ParticipantsFamily.FamilyMembers[0].FullNameSimple', f'{clientname}'),
-                            ('ParticipantsFamily.FamilyMembers[0].FamilyMembership', 'You'),
-                            ('ParticipantsFamily.FamilyMembers[0].Photo', ''),
-                            ('ParticipantsFamily.FamilyMembers[0].PriceTypeId', f'{priceid}'),
-                            ('ParticipantsFamily.FamilyMembers[0].IsParticipating', 'true'),
-                            ('ParticipantsFamily.FamilyMembers[0].IsParticipating', 'false'),
-                            ('ParticipantsFamily.FamilyMembers[0].AttendanceStatus', ''),
-                        ] 
-                        carted-=1
+                    Logger.other(f"[{proxy}] [{self.taskid}] Sleeping... ({delay}s)")
+                    await asyncio.sleep(int(delay))  
+                    # GET request for the Event Booking Page
+                    try:
+                        r = s.get(url[0], timeout=timeout)
+                    except TimeoutError:
+                        failed+=1
+                        Headers.chead()
+                        return Logger.error(f"[{proxy}] [{self.taskid}] Timed out!")
+                    data = BookPageFetch(self.username,clientname,r)
+                    carted-=1
+
             else:
-                Logger.error(f"[{self.username}] Login Error")
+                failed+=1
+                Headers.chead()
+                Logger.error(f"[{proxy}] [{self.taskid}] Login Error")
 
         except Exception as e:
-            Logger.error(f"[{self.username}] {e}")
+            failed+=1
+            Headers.chead()
+            Logger.error(f"[{proxy}] [{self.taskid}] Exception Error: {e}")
+
+        except TimeoutError:
+            failed+=1
+            Headers.chead()
+            return Logger.error(f"[{proxy}] [{self.taskid}] Timed out!")
 
         finally:
             await asyncio.sleep(1.5)
             # Removes item from our queue
-            queue_.get()
-            queue_.task_done()
-            ctypes.windll.kernel32.SetConsoleTitleW(f"OSCAR BOT {version} | {launcher} | Thread(s): {threads} | Delay: {delay} | Sleeping: {sleeping} | Carted: {carted} | Failed: {failed}")
-
-# Has another GET Request right after sleep is done
-class CartHold2():
-    def __init__(self,username,password):
-        self.username,self.password = username,password
-        queue_.put(self)
-        ctypes.windll.kernel32.SetConsoleTitleW(f"OSCAR BOT {version} | {launcher} | Thread(s): {threads} | Delay: {delay} | Sleeping: {sleeping} | Carted: {carted} | Failed: {failed}")
-        threading.Thread(target=self.run).start()
-    def run(self):
-        asyncio.run(self.login_())
-
-    async def login_(self):
-        global sleeping, carted, failed
-        # header
-        headers = {
-                'User-Agent' : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                }
-
-        # request session
-        s = requests.Session()
-        # login thru get request
-        Logger.normal(f"[{self.username}] Logging In")
-        r = s.get(login)   
-        soup = bs(r.text,'lxml')
-        #csrf token fetch
-        try:
-            csrf_token = soup.select_one('meta[name="csrf-token"]')['content']
-        except AttributeError:
-            Logger.error(f"[{self.username}] Error Fetching CSRF Token")
-        # Cookie Fetch
-        cookies = r.cookies
-        # Login Payload
-        data = {
-            "CredentialForm[email]" : f"{self.username}",
-            "CredentialForm[password_curr]" : f"{self.password}",
-            "_csrf":f"{csrf_token}",
-            "btn_login" : "Login",  
-        }
-        # POST Login Payload
-        try:
-            # POST Login URL
-            r = s.post(login, cookies=cookies, data=data, headers=headers)
-            soup = bs(r.text,'lxml')
-            # Finding "Client Element" to see if the Login was successful
-            try:
-                element = soup.find("h1", {"id" : "online-page-header"})
-            except AttributeError:
-                Logger.error(f"[{self.username}] Error Fetching Header: Login Issue")
-
-            if element.text == "Client":
-                Logger.success(f"[{self.username}] Successfully Logged In [{r.status_code}]")
-                ctypes.windll.kernel32.SetConsoleTitleW(f"OSCAR BOT {version} | {launcher} | Thread(s): {threads} | Delay: {delay} | Sleeping: {sleeping} | Carted: {carted} | Failed: {failed}")
-                # clientname data used for payload value
-                clientname = (soup.find("span",class_="client-name")).text
-                Logger.normal(f"[{self.username}] Fetching Payload Data")
-
-                # GET request for the Event Booking Page
-                r = s.get(get_eventid.url)
-                soup = bs(r.text,'lxml')
-                # Important Values for payload
-                try:
-                    eventid2 = (soup.select_one('input[name="EventId"]')["value"])
-                    token = soup.select_one('input[name="__RequestVerificationToken"]')['value']
-                    priceid = soup.find(id='ParticipantsFamily_FamilyMembers_0__PriceTypeId')['value']
-                    widgetid = soup.find(id='EventInfo_WidgetId')['value']
-                    regformid = soup.find(id='EventInfo_RegFormId')['value']
-                    calendarid = soup.find(id='EventInfo_CalendarId')['value']
-                    programid = soup.find(id='EventInfo_ProgramId')['value']
-                    date = soup.find(id="EventInfo_OccurrenceDate")['value']
-                    contactid = soup.find(id='ParticipantsFamily_ReferralContactId')['value']
-                    facilityid = soup.find(id='EventInfo_FacilityId')['value']
-                    parentid = soup.find(id='EventInfo_ParentEventId')['value']
-                    locationid = soup.find(id="EventInfo_LocationId")['value']
-                except AttributeError:
-                    Logger.error(f"[{self.username}] Error Fetching Payload Data")
-                # Payload Dict
-                data = [
-                    ('__RequestVerificationToken', f'{token}'),
-                    ('EventInfo.WidgetId', f'{widgetid}'),
-                    ('EventInfo.RegFormId', f'{regformid}'),
-                    ('EventInfo.CalendarId', f'{calendarid}'),
-                    ('EventInfo.ProgramId', f'{programid}'),
-                    ('EventInfo.ServiceDurationId', ''),
-                    ('EventInfo.LocationId', f'{locationid}'),
-                    ('EventInfo.Instructor.Id', ''),
-                    ('EventInfo.AppointmentStartDateTimeTicks', '0'),
-                    ('EventInfo.OccurrenceDate', f'{date}'),
-                    ('ParticipantsFamily.ReferralContactId', f'{contactid}'),
-                    ('EventInfo.FacilityId', f'{facilityid}'),
-                    ('EventInfo.IgnoreEventCapacity', 'False'),
-                    ('EventInfo.ParentEventId', f'{parentid}'),
-                    ('LandingPageBackUrl', ''),
-                    ('SkipRegistrationForm', 'False'),
-                    ('WaitListMode', 'False'),
-                    ('AmendmentMode', 'False'),
-                    ('AmendmentInitiatorId', ''),
-                    ('ParticipantsFamily.EventId', f'{eventid2}'),
-                    ('ParticipantsFamily.FamilyMembers[0].MemberId', f'{contactid}'),
-                    ('ParticipantsFamily.FamilyMembers[0].AccountId', ''),
-                    ('ParticipantsFamily.FamilyMembers[0].FullNameSimple', f'{clientname}'),
-                    ('ParticipantsFamily.FamilyMembers[0].FamilyMembership', 'You'),
-                    ('ParticipantsFamily.FamilyMembers[0].Photo', ''),
-                    ('ParticipantsFamily.FamilyMembers[0].PriceTypeId', f'{priceid}'),
-                    ('ParticipantsFamily.FamilyMembers[0].IsParticipating', 'true'),
-                    ('ParticipantsFamily.FamilyMembers[0].IsParticipating', 'false'),
-                    ('ParticipantsFamily.FamilyMembers[0].AttendanceStatus', ''),
-                ]
-               
-                if timed_event == "y":
-                    # timed event: sleeps tasks
-                    Logger.other(f"[{self.username}] Sleeping for: {timer.timer(user_time)} second(s)...")
-                    sleeping+=1
-                    ctypes.windll.kernel32.SetConsoleTitleW(f"OSCAR BOT {version} | {launcher} | Thread(s): {threads} | Delay: {delay} | Sleeping: {sleeping} | Carted: {carted} | Failed: {failed}")
-                    await asyncio.sleep(timer.timer(user_time))
-                    sleeping-=1
-                    ctypes.windll.kernel32.SetConsoleTitleW(f"OSCAR BOT {version} | {launcher} | Thread(s): {threads} | Delay: {delay} | Sleeping: {sleeping} | Carted: {carted} | Failed: {failed}")
-                    # Timed Event: ATC process
-                    while True:
-                        Logger.normal(f"[{self.username}] ATC...")
-                        # GET request for the Event Booking Page
-                        r = s.get(get_eventid.url)
-                        soup = bs(r.text,'lxml')
-                        # Important Values for payload
-                        try:
-                            eventid2 = (soup.select_one('input[name="EventId"]')["value"])
-                            token = soup.select_one('input[name="__RequestVerificationToken"]')['value']
-                            priceid = soup.find(id='ParticipantsFamily_FamilyMembers_0__PriceTypeId')['value']
-                            widgetid = soup.find(id='EventInfo_WidgetId')['value']
-                            regformid = soup.find(id='EventInfo_RegFormId')['value']
-                            calendarid = soup.find(id='EventInfo_CalendarId')['value']
-                            programid = soup.find(id='EventInfo_ProgramId')['value']
-                            date = soup.find(id="EventInfo_OccurrenceDate")['value']
-                            contactid = soup.find(id='ParticipantsFamily_ReferralContactId')['value']
-                            facilityid = soup.find(id='EventInfo_FacilityId')['value']
-                            parentid = soup.find(id='EventInfo_ParentEventId')['value']
-                            locationid = soup.find(id="EventInfo_LocationId")['value']
-                        except AttributeError:
-                            Logger.error(f"[{self.username}] Error Fetching Payload Data")
-                        # Payload Dict
-                        data = [
-                            ('__RequestVerificationToken', f'{token}'),
-                            ('EventInfo.WidgetId', f'{widgetid}'),
-                            ('EventInfo.RegFormId', f'{regformid}'),
-                            ('EventInfo.CalendarId', f'{calendarid}'),
-                            ('EventInfo.ProgramId', f'{programid}'),
-                            ('EventInfo.ServiceDurationId', ''),
-                            ('EventInfo.LocationId', f'{locationid}'),
-                            ('EventInfo.Instructor.Id', ''),
-                            ('EventInfo.AppointmentStartDateTimeTicks', '0'),
-                            ('EventInfo.OccurrenceDate', f'{date}'),
-                            ('ParticipantsFamily.ReferralContactId', f'{contactid}'),
-                            ('EventInfo.FacilityId', f'{facilityid}'),
-                            ('EventInfo.IgnoreEventCapacity', 'False'),
-                            ('EventInfo.ParentEventId', f'{parentid}'),
-                            ('LandingPageBackUrl', ''),
-                            ('SkipRegistrationForm', 'False'),
-                            ('WaitListMode', 'False'),
-                            ('AmendmentMode', 'False'),
-                            ('AmendmentInitiatorId', ''),
-                            ('ParticipantsFamily.EventId', f'{eventid2}'),
-                            ('ParticipantsFamily.FamilyMembers[0].MemberId', f'{contactid}'),
-                            ('ParticipantsFamily.FamilyMembers[0].AccountId', ''),
-                            ('ParticipantsFamily.FamilyMembers[0].FullNameSimple', f'{clientname}'),
-                            ('ParticipantsFamily.FamilyMembers[0].FamilyMembership', 'You'),
-                            ('ParticipantsFamily.FamilyMembers[0].Photo', ''),
-                            ('ParticipantsFamily.FamilyMembers[0].PriceTypeId', f'{priceid}'),
-                            ('ParticipantsFamily.FamilyMembers[0].IsParticipating', 'true'),
-                            ('ParticipantsFamily.FamilyMembers[0].IsParticipating', 'false'),
-                            ('ParticipantsFamily.FamilyMembers[0].AttendanceStatus', ''),
-                        ]
-               
-                        # POST Fill Form
-                        r=s.post(form, headers=headers, cookies=cookies, data=data)
-                        soup = bs(r.text,'lxml')
-
-                        # This element will determine whether or not session had ATC'd
-                        element = soup.find("h2", {"id" : "bm-form-header"})
-
-                        # if element is not found, retry [3 Attempts before terminating]
-                        if element is None:
-                            failed+=1
-                            ctypes.windll.kernel32.SetConsoleTitleW(f"OSCAR BOT {version} | {launcher} | Thread(s): {threads} | Delay: {delay} | Sleeping: {sleeping} | Carted: {carted} | Failed: {failed}")
-                            retry=0
-                            while retry < 3:
-                                Logger.error(f'[{self.username}] Error: Full / Not Opened! Retrying [{retry}]...')
-                                wh("cart_hold","Error",self.username)
-                                Logger.other(f"[{self.username}] Sleeping... [{delay}]")
-                                await asyncio.sleep(int(delay))
-                                Logger.normal(f"[{self.username}] Refreshing...")
-                                r=s.post(form, headers=headers, cookies=cookies, data=data)
-                                retry+=1
-                            else:
-                                Logger.error(f'[{self.username}] Error: Full / Not Opened! Terminating [{retry}]')
-                                return False
-
-                        # successfully carted lesgo
-                        elif element.text == "DROP-IN - ADULT - OPEN GYM":
-                            carted+=1
-                            ctypes.windll.kernel32.SetConsoleTitleW(f"OSCAR BOT {version} | {launcher} | Thread(s): {threads} | Delay: {delay} | Sleeping: {sleeping} | Carted: {carted} | Failed: {failed}")
-                            Logger.success(f"[{self.username}] Successfully Carted! [{r.status_code}]")
-                            wh("cart_hold","Success",self.username)
-                        Logger.other(f"[{self.username}] Sleeping... [{delay}]")
-                        await asyncio.sleep(int(delay)) 
-                        # GET request for the Event Booking Page
-                        r = s.get(get_eventid.url)
-                        soup = bs(r.text,'lxml')
-                        # Important Values for payload
-                        try:
-                            eventid2 = (soup.select_one('input[name="EventId"]')["value"])
-                            token = soup.select_one('input[name="__RequestVerificationToken"]')['value']
-                            priceid = soup.find(id='ParticipantsFamily_FamilyMembers_0__PriceTypeId')['value']
-                            widgetid = soup.find(id='EventInfo_WidgetId')['value']
-                            regformid = soup.find(id='EventInfo_RegFormId')['value']
-                            calendarid = soup.find(id='EventInfo_CalendarId')['value']
-                            programid = soup.find(id='EventInfo_ProgramId')['value']
-                            date = soup.find(id="EventInfo_OccurrenceDate")['value']
-                            contactid = soup.find(id='ParticipantsFamily_ReferralContactId')['value']
-                            facilityid = soup.find(id='EventInfo_FacilityId')['value']
-                            parentid = soup.find(id='EventInfo_ParentEventId')['value']
-                            locationid = soup.find(id="EventInfo_LocationId")['value']
-                        except AttributeError:
-                            Logger.error(f"[{self.username}] Error Fetching Payload Data")
-                        # Payload Dict
-                        data = [
-                            ('__RequestVerificationToken', f'{token}'),
-                            ('EventInfo.WidgetId', f'{widgetid}'),
-                            ('EventInfo.RegFormId', f'{regformid}'),
-                            ('EventInfo.CalendarId', f'{calendarid}'),
-                            ('EventInfo.ProgramId', f'{programid}'),
-                            ('EventInfo.ServiceDurationId', ''),
-                            ('EventInfo.LocationId', f'{locationid}'),
-                            ('EventInfo.Instructor.Id', ''),
-                            ('EventInfo.AppointmentStartDateTimeTicks', '0'),
-                            ('EventInfo.OccurrenceDate', f'{date}'),
-                            ('ParticipantsFamily.ReferralContactId', f'{contactid}'),
-                            ('EventInfo.FacilityId', f'{facilityid}'),
-                            ('EventInfo.IgnoreEventCapacity', 'False'),
-                            ('EventInfo.ParentEventId', f'{parentid}'),
-                            ('LandingPageBackUrl', ''),
-                            ('SkipRegistrationForm', 'False'),
-                            ('WaitListMode', 'False'),
-                            ('AmendmentMode', 'False'),
-                            ('AmendmentInitiatorId', ''),
-                            ('ParticipantsFamily.EventId', f'{eventid2}'),
-                            ('ParticipantsFamily.FamilyMembers[0].MemberId', f'{contactid}'),
-                            ('ParticipantsFamily.FamilyMembers[0].AccountId', ''),
-                            ('ParticipantsFamily.FamilyMembers[0].FullNameSimple', f'{clientname}'),
-                            ('ParticipantsFamily.FamilyMembers[0].FamilyMembership', 'You'),
-                            ('ParticipantsFamily.FamilyMembers[0].Photo', ''),
-                            ('ParticipantsFamily.FamilyMembers[0].PriceTypeId', f'{priceid}'),
-                            ('ParticipantsFamily.FamilyMembers[0].IsParticipating', 'true'),
-                            ('ParticipantsFamily.FamilyMembers[0].IsParticipating', 'false'),
-                            ('ParticipantsFamily.FamilyMembers[0].AttendanceStatus', ''),
-                        ] 
-                        carted-=1
+            with open(f'./data/logs/logs_{self.taskid}_{datetime.utcnow().strftime("%Y_%m_%d_%H_%M_%S")}.txt','w+') as f:
+                f.write("d")
                 
-                elif timed_event == "n":
-                    # non timed event
-                    while True:
-                        Logger.normal(f"[{self.username}] ATC...")
-                        # POST request on FillForm URL
-                        r=s.post(form, headers=headers, cookies=cookies, data=data)
-                        soup = bs(r.text,'lxml')
-                        # Check to see if successfully carted
-                        element = soup.find("h2", {"id" : "bm-form-header"})
-                        if element is None:
-                            failed+=1
-                            ctypes.windll.kernel32.SetConsoleTitleW(f"OSCAR BOT {version} | {launcher} | Thread(s): {threads} | Delay: {delay} | Sleeping: {sleeping} | Carted: {carted} | Failed: {failed}")
-                            retry=0
-                            while retry < 3:
-                                Logger.error(f'[{self.username}] Error: Full / Not Opened! Retrying [{retry}]...')
-                                wh("cart_hold","Error",self.username)
-                                Logger.other(f"[{self.username}] Sleeping... [{delay}]")
-                                await asyncio.sleep(int(delay))
-                                Logger.normal(f"[{self.username}] Refreshing...")
-                                r=s.post(form, headers=headers, cookies=cookies, data=data)
-                                retry+=1
-                            else:
-                                Logger.error(f'[{self.username}] Error: Full / Not Opened! Terminating [{retry}]')
-                                return False
-                        
-                        if element.text == "DROP-IN - ADULT - OPEN GYM":
-                            carted+=1
-                            ctypes.windll.kernel32.SetConsoleTitleW(f"OSCAR BOT {version} | {launcher} | Thread(s): {threads} | Delay: {delay} | Sleeping: {sleeping} | Carted: {carted} | Failed: {failed}")
-                            Logger.success(f"[{self.username}] Successfully Carted! [{r.status_code}]")
-                            wh("cart_hold","Success",self.username)
-
-                        Logger.other(f"[{self.username}] Sleeping... [{delay}]")
-                        await asyncio.sleep(int(delay))  
-                        # GET request for the Event Booking Page
-                        r = s.get(get_eventid.url)
-                        soup = bs(r.text,'lxml')
-                        # Important Values for payload
-                        try:
-                            eventid2 = (soup.select_one('input[name="EventId"]')["value"])
-                            token = soup.select_one('input[name="__RequestVerificationToken"]')['value']
-                            priceid = soup.find(id='ParticipantsFamily_FamilyMembers_0__PriceTypeId')['value']
-                            widgetid = soup.find(id='EventInfo_WidgetId')['value']
-                            regformid = soup.find(id='EventInfo_RegFormId')['value']
-                            calendarid = soup.find(id='EventInfo_CalendarId')['value']
-                            programid = soup.find(id='EventInfo_ProgramId')['value']
-                            date = soup.find(id="EventInfo_OccurrenceDate")['value']
-                            contactid = soup.find(id='ParticipantsFamily_ReferralContactId')['value']
-                            facilityid = soup.find(id='EventInfo_FacilityId')['value']
-                            parentid = soup.find(id='EventInfo_ParentEventId')['value']
-                            locationid = soup.find(id="EventInfo_LocationId")['value']
-                        except AttributeError:
-                            Logger.error(f"[{self.username}] Error Fetching Payload Data")
-                        # Payload Dict
-                        data = [
-                            ('__RequestVerificationToken', f'{token}'),
-                            ('EventInfo.WidgetId', f'{widgetid}'),
-                            ('EventInfo.RegFormId', f'{regformid}'),
-                            ('EventInfo.CalendarId', f'{calendarid}'),
-                            ('EventInfo.ProgramId', f'{programid}'),
-                            ('EventInfo.ServiceDurationId', ''),
-                            ('EventInfo.LocationId', f'{locationid}'),
-                            ('EventInfo.Instructor.Id', ''),
-                            ('EventInfo.AppointmentStartDateTimeTicks', '0'),
-                            ('EventInfo.OccurrenceDate', f'{date}'),
-                            ('ParticipantsFamily.ReferralContactId', f'{contactid}'),
-                            ('EventInfo.FacilityId', f'{facilityid}'),
-                            ('EventInfo.IgnoreEventCapacity', 'False'),
-                            ('EventInfo.ParentEventId', f'{parentid}'),
-                            ('LandingPageBackUrl', ''),
-                            ('SkipRegistrationForm', 'False'),
-                            ('WaitListMode', 'False'),
-                            ('AmendmentMode', 'False'),
-                            ('AmendmentInitiatorId', ''),
-                            ('ParticipantsFamily.EventId', f'{eventid2}'),
-                            ('ParticipantsFamily.FamilyMembers[0].MemberId', f'{contactid}'),
-                            ('ParticipantsFamily.FamilyMembers[0].AccountId', ''),
-                            ('ParticipantsFamily.FamilyMembers[0].FullNameSimple', f'{clientname}'),
-                            ('ParticipantsFamily.FamilyMembers[0].FamilyMembership', 'You'),
-                            ('ParticipantsFamily.FamilyMembers[0].Photo', ''),
-                            ('ParticipantsFamily.FamilyMembers[0].PriceTypeId', f'{priceid}'),
-                            ('ParticipantsFamily.FamilyMembers[0].IsParticipating', 'true'),
-                            ('ParticipantsFamily.FamilyMembers[0].IsParticipating', 'false'),
-                            ('ParticipantsFamily.FamilyMembers[0].AttendanceStatus', ''),
-                        ] 
-                        carted-=1
-            else:
-                Logger.error(f"[{self.username}] Login Error")
-
-        except Exception as e:
-            Logger.error(f"[{self.username}] {e}")
-
-        finally:
-            await asyncio.sleep(1.5)
-            # Removes item from our queue
             queue_.get()
             queue_.task_done()
-            ctypes.windll.kernel32.SetConsoleTitleW(f"OSCAR BOT {version} | {launcher} | Thread(s): {threads} | Delay: {delay} | Sleeping: {sleeping} | Carted: {carted} | Failed: {failed}")
 
-# Menu Interface
-if __name__ == '__main__':
+# fetch module for fetching basketball timeslots in the classes.svg
+def fetch(url,headers,data):
+    print("Fetching Timeslots")
+    if use_proxies:
+        try:
+            proxyList=[]
+            with open("./data/proxies.txt", "r+") as f:
+                # if proxies.txt is empty -> will POST request on localhost
+                if f.read() == "":
+                    try:
+                        response = requests.post(url, headers=headers, data=data, timeout=timeout)
+                    except Exception as e:
+                        return print(f"Error fetching classes.svg: {e}")
+                else:
+                    with open("./data/proxies.txt", "r+") as f:
+                        # if proxies.txt has proxies -> will POST request on a random proxy
+                        for proxy in f:
+                            proxyList.append(proxy)
+                        proxy = Proxy.get_proxy(proxyList)
+                        try:
+                            if proxy[1] == "IP":
+                                proxies = {'https' : f'http://{proxy[0]}'}
+                                response = requests.post(url, headers=headers, data=data, proxies=proxies, timeout=timeout)
+                            elif proxy[1] == "UP":
+                                auth = HTTPProxyAuth(f"{proxy[0].split(':')[2]}",f"{proxy[0].split(':')[3]}")
+                                proxies = {'http' : f"http://{proxy[0].split(':')[0]}:{proxy[0].split(':')[1]}"}
+                                response = requests.post(url, headers=headers, data=data, proxies=proxies, auth=auth, timeout=timeout)
+                            elif proxy[1] == "LH":
+                                response = requests.post(url, headers=headers, data=data, timeout=timeout)
+                        except ProxyError:
+                            return Logger.error2(f"Proxy Error {proxy}")
+                        except TimeoutError:
+                            return Logger.error2("Timed Out!")
+                            
+                    
+            proxy = re.split("\n",proxy[0])
+            classData = json.loads(response.text)['classes']
+            for data in classData:
+                if data["EventName"] == "REGISTER | Basketball Member/Student Access":
+                    if data["Spots"] == "":
+                        data["Spots"] = "null"
+                    fetchedList.extend([[data['FormattedStartDate'],data['EventTimeDescription'],data['Spots'],data['EventId']]])
+            return fetchedList
+
+        except TimeoutError:
+            return Logger.error2(f"[{proxy}] Timed Out!")
+        except Exception as e:
+            return Logger.error2(f"[{proxy}] Fetching Error: {e}")
+        
+    else:
+        response = requests.post(url, headers=headers, data=data)
+        classData = json.loads(response.text)['classes']
+        for data in classData:
+            if data["EventName"] == "REGISTER | Basketball Member/Student Access":
+                if data["Spots"] == "":
+                    data["Spots"] = "null"
+                fetchedList.extend([[data['FormattedStartDate'],data['EventTimeDescription'],data['Spots'],data['EventId']]])
+        return fetchedList
+
+def main():
     while True:
-        print(f"{Fore.WHITE}[1] Cart Hold\n[2] Parse EventId\n[3] Settings\n[4] Exit\n")
+        print(f"{Fore.WHITE}[1] Cart Hold\n[2] Exit\n")
         selection = input("Input: ")
         print("\n")
 
         # Cart Mode (1)
         if selection == "1": 
-            print("Cart Hold Mode")
-            eventid = input("Input Event ID: ")
-            get_eventid.get_eventid(eventid)
-            profile_count()
-            timed_event = input(f"{Fore.WHITE}Timed Event? [Y] | [N]: ").lower() 
+            print("Cart Hold Mode\nInitialising\n")
             inits()
-
-            if timed_event == "y":
-                user_time = input("Input Time [HH:MM:SS]: ")
-                timer.timer(user_time)
-                for i in range(profiles):
+            # fetching all courses in classes.svg
+            fetchedList = fetch(url,headers,data)
+            if fetchedList is None:
+                import time
+                Logger.error2("\nFetched Nothing: Terminating in 5 seconds!")
+                time.sleep(5)
+                break
+            else:
+                for key,courses in enumerate(fetchedList):
+                    print(key,courses)
+                eventid = input("Input Index Number: ")
+                selectedCourse = fetchedList[int(eventid)]
+                Logger.n2(f"{selectedCourse[3]} Selected\n")
+                fetchedList.clear()
+                for i in range(prof_count()):
                     get_profiles(i)
-                    CartHold(username,password)
+                    CartHold(id_gen(),username,password,selectedCourse[3])
                 queue_.join()
-            
-            if timed_event == "n":
-                for i in range(profiles):
-                    get_profiles(i)
-                    CartHold(username,password)
-                queue_.join()
-
-        # Event Id Parser
-        elif selection == "2":
-            url = input(str("Input URL: "))
-            try:
-                id = re.split('classId=|&occurrenceDate',url)[1]
-                print("\n"+id+"\n")
-                pass 
-            except IndexError:
-                pass
-
-        # Settings
-        elif selection == "3":
-            print("View Settings\n")
-            setting_list=[]
-            with open("./data/settings.json", "r+") as settings:
-                data = json.load(settings)
-                for index,key in enumerate(data,start=1):
-                    setting_list.append(key)
-                    print(f"[{index}] {key}: {data[key]}")
-                print(f"[{index+1}] Test Webhook\n[{index+2}] Go Back")  
-                edit_settings = input("\nInput: ")
-                if edit_settings == f'{index-5}':
-                    edit_ = input(f"\n{setting_list[index-6]}: ")
-                    data[setting_list[index-6]] = int(edit_)
-                    settings.seek(0)
-                    settings.truncate()
-                    json.dump(data, settings,indent=4)
-                elif edit_settings == f'{index-4}':
-                    edit_ = input(f"\n{setting_list[index-5]}: ").lower()
-                    data[setting_list[index-5]] = bool(edit_)
-                    settings.seek(0)
-                    settings.truncate()
-                    json.dump(data, settings,indent=4)
-                elif edit_settings == f'{index-3}':
-                    edit_ = input(f"\n{setting_list[index-4]}: ").lower()
-                    data[setting_list[index-4]] = bool(edit_)
-                    settings.seek(0)
-                    settings.truncate()
-                    json.dump(data, settings,indent=4)
-                elif edit_settings == f'{index-2}':
-                    edit_ = input(f"\n{setting_list[index-3]}: ")
-                    data[setting_list[index-3]] = str(edit_)
-                    settings.seek(0)
-                    settings.truncate()
-                    json.dump(data, settings,indent=4)
-                elif edit_settings == f'{index-1}':
-                    edit_ = input(f"\n{setting_list[index-2]}: ")
-                    data[setting_list[index-2]] = int(edit_)
-                    settings.seek(0)
-                    settings.truncate()
-                    json.dump(data, settings,indent=4)    
-                elif edit_settings == f'{index}':
-                    edit_ = input(f"\n{key}: ")
-                    data[setting_list[index-1]] = int(edit_)
-                    settings.seek(0)
-                    settings.truncate()
-                    json.dump(data, settings,indent=4)   
-                elif edit_settings == f'{index+1}':
-                    with open("./data/settings.json", "r") as settings:
-                        data = json.loads(settings.read())
-                        wh_ = data['webhook']
-                    wh("test_wh","Success","200")
-                elif edit_settings == f'{index+2}':
-                    continue
-                else:
-                    pass
         
         # Exit
-        elif selection == "4":
+        elif selection == "2":
+            import os
             print("Exiting")
+            try:
+                os.system('taskkill /f /im launcher.exe /T')
+            except FileNotFoundError:
+                os.system('taskkill /f /im launcher.py /T')
             sys.exit()
-        
-        # Cart Mode (2)
-        if selection == "5": 
-            print("Cart Hold Mode")
-            eventid = input("Input Event ID: ")
-            get_eventid.get_eventid(eventid)
-            profile_count()
-            timed_event = input(f"{Fore.WHITE}Timed Event? [Y] | [N]: ").lower() 
-            inits()
 
-            if timed_event == "y":
-                user_time = input("Input Time [HH:MM:SS]: ")
-                timer.timer(user_time)
-                for i in range(profiles):
-                    get_profiles(i)
-                    CartHold2(username,password)
-                queue_.join()
-            
-            if timed_event == "n":
-                for i in range(profiles):
-                    get_profiles(i)
-                    CartHold2(username,password)
-                queue_.join()
         else:
             pass
+
+# Menu Interface
+if __name__ == '__main__':
+    main()
